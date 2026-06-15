@@ -1,0 +1,540 @@
+// MRML includes
+#include "vtkMRMLScene.h"
+#include "vtkMRMLVolumePropertyNode.h"
+#include "vtkMRMLVolumePropertyJsonStorageNode.h"
+
+// VTK includes
+#include <vtkCommand.h>
+#include <vtkColorTransferFunction.h>
+#include <vtkIntArray.h>
+#include <vtkObjectFactory.h>
+#include <vtkNew.h>
+#include <vtkPiecewiseFunction.h>
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
+
+// STD includes
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <limits>
+#include <sstream>
+
+//----------------------------------------------------------------------------
+vtkMRMLNodeNewMacro(vtkMRMLVolumePropertyNode);
+
+//----------------------------------------------------------------------------
+vtkMRMLVolumePropertyNode::vtkMRMLVolumePropertyNode()
+  : EffectiveRange{ 0.0, -1.0 }
+{
+  this->TypeDisplayName = vtkMRMLTr("vtkMRMLVolumePropertyNode", "Volume Property");
+
+  this->ObservedEvents = vtkSmartPointer<vtkIntArray>::New();
+  this->ObservedEvents->InsertNextValue(vtkCommand::StartEvent);
+  this->ObservedEvents->InsertNextValue(vtkCommand::ModifiedEvent);
+  this->ObservedEvents->InsertNextValue(vtkCommand::EndEvent);
+  this->ObservedEvents->InsertNextValue(vtkCommand::StartInteractionEvent);
+  this->ObservedEvents->InsertNextValue(vtkCommand::InteractionEvent);
+  this->ObservedEvents->InsertNextValue(vtkCommand::EndInteractionEvent);
+
+  vtkNew<vtkVolumeProperty> property;
+  // Create transfer function instances
+  // (creating them after the property is set in the node would generate unnecessary modified events
+  // that may be misleading during debugging)
+  property->GetRGBTransferFunction();
+  property->GetScalarOpacity();
+  property->GetGradientOpacity();
+
+  property->SetUseClippedVoxelIntensity(true);
+  // Clipped voxel intensity has to be a different enough so that it the computed gradient
+  // will change primarily between the two sides of the clipping plane.
+  // Default value is -10e37, which does not result in smooth clipped surface (most probably
+  // due to numerical errors), but -1e10 works robustly.
+  property->SetClippedVoxelIntensity(-1e10);
+  vtkSetAndObserveMRMLObjectEventsMacro(this->VolumeProperty, property, this->ObservedEvents);
+
+  // Observe the transfer functions
+  for (int i = 0; i < VTK_MAX_VRCOMP; ++i)
+  {
+    this->SetColor(property->GetRGBTransferFunction(i), i);
+    this->SetScalarOpacity(property->GetScalarOpacity(i), i);
+    this->SetGradientOpacity(property->GetGradientOpacity(i), i);
+  }
+
+  this->SetHideFromEditors(0);
+}
+
+//----------------------------------------------------------------------------
+vtkMRMLVolumePropertyNode::~vtkMRMLVolumePropertyNode()
+{
+  if (this->VolumeProperty)
+  {
+    for (int i = 0; i < VTK_MAX_VRCOMP; ++i)
+    {
+      vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetScalarOpacity(i));
+      vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetGradientOpacity(i));
+      vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetRGBTransferFunction(i));
+    }
+    vtkSetAndObserveMRMLObjectMacro(this->VolumeProperty, nullptr);
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetEffectiveRange(double min, double max)
+{
+  vtkDebugMacro(<< this->GetClassName() << " (" << this << "): setting EffectiveRange to (" << min << "," << max << ")");
+  if ((this->EffectiveRange[0] != min) || (this->EffectiveRange[1] != max))
+  {
+    this->EffectiveRange[0] = min;
+    this->EffectiveRange[1] = max;
+    this->Modified();
+    this->InvokeCustomModifiedEvent(EffectiveRangeModified);
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetEffectiveRange(double range[2])
+{
+  this->SetEffectiveRange(range[0], range[1]);
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::WriteXML(ostream& of, int nIndent)
+{
+  // Write all attributes not equal to their defaults
+  this->Superclass::WriteXML(of, nIndent);
+
+  vtkMRMLWriteXMLBeginMacro(of);
+  // Other attributes are written to vp/vp.json files.
+  vtkMRMLWriteXMLVectorMacro(effectiveRange, EffectiveRange, double, 2);
+  vtkMRMLWriteXMLEndMacro();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::ReadXMLAttributes(const char** atts)
+{
+  int disabledModify = this->StartModify();
+
+  this->Superclass::ReadXMLAttributes(atts);
+
+  // Kept for backward compatibility
+  vtkMRMLReadXMLBeginMacro(atts);
+  vtkMRMLReadXMLIntMacro(interpolation, InterpolationType);
+  vtkMRMLReadXMLIntMacro(shade, Shade);
+  vtkMRMLReadXMLFloatMacro(diffuse, Diffuse);
+  vtkMRMLReadXMLFloatMacro(ambient, Ambient);
+  vtkMRMLReadXMLFloatMacro(specular, Specular);
+  vtkMRMLReadXMLFloatMacro(specularPower, SpecularPower);
+  vtkMRMLReadXMLStdStringMacro(scalarOpacity, ScalarOpacityAsString);
+  vtkMRMLReadXMLStdStringMacro(gradientOpacity, GradientOpacityAsString);
+  vtkMRMLReadXMLStdStringMacro(colorTransfer, RGBTransferFunctionAsString);
+  vtkMRMLReadXMLVectorMacro(effectiveRange, EffectiveRange, double, 2);
+  vtkMRMLReadXMLEndMacro();
+
+  this->EndModify(disabledModify);
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::CopyContent(vtkMRMLNode* anode, bool deepCopy /*=true*/)
+{
+  MRMLNodeModifyBlocker blocker(this);
+  Superclass::CopyContent(anode, deepCopy);
+  this->CopyParameterSet(anode);
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::CopyParameterSet(vtkMRMLNode* anode)
+{
+  vtkMRMLVolumePropertyNode* node = vtkMRMLVolumePropertyNode::SafeDownCast(anode);
+  if (!node)
+  {
+    vtkErrorMacro("CopyParameterSet: Invalid input MRML node");
+    return;
+  }
+
+  vtkMRMLCopyBeginMacro(anode);
+  vtkMRMLCopyVectorMacro(EffectiveRange, double, 2);
+  vtkMRMLCopyEndMacro();
+
+  // VolumeProperty
+  this->VolumeProperty->DeepCopy(node->GetVolumeProperty());
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::PrintSelf(ostream& os, vtkIndent indent)
+{
+  this->Superclass::PrintSelf(os, indent);
+
+  vtkMRMLPrintBeginMacro(os, indent);
+  vtkMRMLPrintVectorMacro(EffectiveRange, double, 2);
+  vtkMRMLPrintEndMacro();
+
+  os << indent << "VolumeProperty:\n";
+  this->VolumeProperty->PrintSelf(os, indent.GetNextIndent());
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::ProcessMRMLEvents(vtkObject* caller, unsigned long event, void* callData)
+{
+  this->Superclass::ProcessMRMLEvents(caller, event, callData);
+  switch (event)
+  {
+    case vtkCommand::StartEvent:
+    case vtkCommand::EndEvent:
+    case vtkCommand::StartInteractionEvent:
+    case vtkCommand::InteractionEvent:
+    case vtkCommand::EndInteractionEvent: this->InvokeEvent(event); break;
+    case vtkCommand::ModifiedEvent:
+      if (!this->IgnoreVolumePropertyChanges)
+      {
+        this->StorableModified();
+        // Let observers know about node modification, but do not change the modified timestamp,
+        // because the changed information is stored in the
+        this->InvokeCustomModifiedEvent(vtkCommand::ModifiedEvent);
+      }
+      break;
+  }
+}
+
+//---------------------------------------------------------------------------
+std::string vtkMRMLVolumePropertyNode::DataToString(double* data, int size)
+{
+  std::stringstream resultStream;
+  double* it = data;
+  // Write header
+  resultStream << size;
+  resultStream.precision(std::numeric_limits<double>::digits10);
+  for (int i = 0; i < size; ++i)
+  {
+    resultStream << " ";
+    resultStream << *it;
+    it++;
+  }
+  return resultStream.str();
+}
+
+//---------------------------------------------------------------------------
+int vtkMRMLVolumePropertyNode::DataFromString(const std::string& dataString, double*& data)
+{
+  std::stringstream stream;
+  stream << dataString;
+
+  int size = 0;
+  stream >> size;
+  if (size == 0)
+  {
+    return 0;
+  }
+  data = new double[size];
+  for (int i = 0; i < size; ++i)
+  {
+    std::string s;
+    stream >> s;
+    data[i] = atof(s.c_str());
+  }
+  return size;
+}
+
+//---------------------------------------------------------------------------
+int vtkMRMLVolumePropertyNode::NodesFromString(const std::string& dataString, double*& nodes, int nodeSize)
+{
+  int size = vtkMRMLVolumePropertyNode::DataFromString(dataString, nodes);
+  if (size % nodeSize)
+  {
+    vtkGenericWarningMacro("vtkMRMLVolumePropertyNode::NodesFromString: Error parsing data string");
+    return 0;
+  }
+  // Ensure uniqueness with a float32-safe minimum spacing. This may shift x
+  // coordinates upward even when they are already strictly increasing but too
+  // close to survive float32 round-tripping.
+  double previous = VTK_DOUBLE_MIN;
+  for (int i = 0; i < size; i += nodeSize)
+  {
+    nodes[i] = vtkMRMLVolumePropertyNode::HigherAndUnique(nodes[i], previous);
+  }
+  return size / nodeSize;
+}
+
+//---------------------------------------------------------------------------
+std::string vtkMRMLVolumePropertyNode::GetPiecewiseFunctionString(vtkPiecewiseFunction* function)
+{
+  return vtkMRMLVolumePropertyNode::DataToString(function->GetDataPointer(), function->GetSize() * 2);
+}
+
+//---------------------------------------------------------------------------
+std::string vtkMRMLVolumePropertyNode::GetColorTransferFunctionString(vtkColorTransferFunction* function)
+{
+  return vtkMRMLVolumePropertyNode::DataToString(function->GetDataPointer(), function->GetSize() * 4);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::GetPiecewiseFunctionFromString(const std::string& str, vtkPiecewiseFunction* result)
+{
+  double* data = nullptr;
+  int size = vtkMRMLVolumePropertyNode::NodesFromString(str, data, 2);
+  if (size)
+  {
+    result->FillFromDataPointer(size, data);
+  }
+  delete[] data;
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::GetColorTransferFunctionFromString(const std::string& str, vtkColorTransferFunction* result)
+{
+  double* data = nullptr;
+  int size = vtkMRMLVolumePropertyNode::NodesFromString(str, data, 4);
+  if (size)
+  {
+    result->FillFromDataPointer(size, data);
+  }
+  delete[] data;
+}
+
+//----------------------------------------------------------------------------
+double vtkMRMLVolumePropertyNode::NextHigher(double value)
+{
+  // Advance by 10 float32 ULPs so the result remains distinguishable from
+  // value even when coordinates pass through float32 arithmetic (e.g., in
+  // VTK widget MovePoints which stores positions in vtkVector2f). 10 ULPs
+  // provides a comfortable margin against accumulated numerical inaccuracies.
+  float fNext = static_cast<float>(value);
+  // Start from the smallest normal float when f is zero so that the ULP steps
+  // advance through normal (non-subnormal) values only, as subnormal floats
+  // could be flushed back to 0.0f on some systems.
+  if (fNext == 0.0f)
+  {
+    fNext = std::numeric_limits<float>::min();
+  }
+  for (int i = 0; i < 10; ++i)
+  {
+    fNext = std::nextafter(fNext, std::numeric_limits<float>::infinity());
+  }
+  // fNext in theory can be infinity if value is very large, but in practice it
+  // should not be an issue because volume rendering transfer function points with
+  // such large x values would not make sense.
+  return static_cast<double>(fNext);
+}
+
+//----------------------------------------------------------------------------
+double vtkMRMLVolumePropertyNode::HigherAndUnique(double value, double& previousValue)
+{
+  value = std::max(value, previousValue);
+  // Ensure a very small but safe gap to ensure adjacent point remain distinct,
+  // even if point coordinates are temporarily converted to float32.
+  double minAcceptable = vtkMRMLVolumePropertyNode::NextHigher(previousValue);
+  if (value < minAcceptable)
+  {
+    value = minAcceptable;
+  }
+  previousValue = value;
+  return value;
+}
+
+//---------------------------------------------------------------------------
+vtkMRMLStorageNode* vtkMRMLVolumePropertyNode::CreateDefaultStorageNode()
+{
+  vtkMRMLScene* scene = this->GetScene();
+  if (scene == nullptr)
+  {
+    vtkErrorMacro("CreateDefaultStorageNode failed: scene is invalid");
+    return nullptr;
+  }
+  return vtkMRMLStorageNode::SafeDownCast(scene->CreateNodeByClass("vtkMRMLVolumePropertyJsonStorageNode"));
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetScalarOpacity(vtkPiecewiseFunction* newScalarOpacity, int component)
+{
+  vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetScalarOpacity(component));
+  this->VolumeProperty->SetScalarOpacity(component, newScalarOpacity);
+  vtkObserveMRMLObjectEventsMacro(this->VolumeProperty->GetScalarOpacity(component), this->ObservedEvents);
+}
+
+//---------------------------------------------------------------------------
+vtkPiecewiseFunction* vtkMRMLVolumePropertyNode::GetScalarOpacity(int component)
+{
+  return this->VolumeProperty->GetScalarOpacity(component);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetGradientOpacity(vtkPiecewiseFunction* newGradientOpacity, int component)
+{
+  vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetGradientOpacity(component));
+  this->VolumeProperty->SetGradientOpacity(component, newGradientOpacity);
+  vtkObserveMRMLObjectEventsMacro(this->VolumeProperty->GetGradientOpacity(component), this->ObservedEvents);
+}
+
+//---------------------------------------------------------------------------
+vtkPiecewiseFunction* vtkMRMLVolumePropertyNode::GetGradientOpacity(int component)
+{
+  return this->VolumeProperty->GetGradientOpacity(component);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetColor(vtkColorTransferFunction* newColorFunction, int component)
+{
+  vtkUnObserveMRMLObjectMacro(this->VolumeProperty->GetRGBTransferFunction(component));
+  this->VolumeProperty->SetColor(component, newColorFunction);
+  vtkObserveMRMLObjectEventsMacro(this->VolumeProperty->GetRGBTransferFunction(component), this->ObservedEvents);
+}
+
+//---------------------------------------------------------------------------
+vtkColorTransferFunction* vtkMRMLVolumePropertyNode::GetColor(int component)
+{
+  return this->VolumeProperty->GetRGBTransferFunction(component);
+}
+
+//---------------------------------------------------------------------------
+bool vtkMRMLVolumePropertyNode::CalculateEffectiveRange(int component)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("CalculateEffectiveRange: Invalid volume property");
+    return false;
+  }
+
+  vtkColorTransferFunction* colorTransferFunction = this->VolumeProperty->GetRGBTransferFunction(component);
+  vtkPiecewiseFunction* opacityFunction = this->VolumeProperty->GetScalarOpacity(component);
+  vtkPiecewiseFunction* gradientFunction = this->VolumeProperty->GetGradientOpacity(component);
+  if (!colorTransferFunction || !opacityFunction || !gradientFunction)
+  {
+    vtkErrorMacro("CalculateEffectiveRange: Invalid transfer functions in volume property");
+    return false;
+  }
+
+  double effectiveRange[2] = { 0.0 };
+
+  double colorRange[2] = { 0.0 };
+  colorTransferFunction->GetRange(colorRange);
+  effectiveRange[0] = std::min(effectiveRange[0], colorRange[0]);
+  effectiveRange[1] = std::max(effectiveRange[1], colorRange[1]);
+
+  double opacityRange[2] = { 0.0 };
+  opacityFunction->GetRange(opacityRange);
+  effectiveRange[0] = std::min(effectiveRange[0], opacityRange[0]);
+  effectiveRange[1] = std::max(effectiveRange[1], opacityRange[1]);
+
+  double gradientRange[2] = { 0.0 };
+  gradientFunction->GetRange(gradientRange);
+  effectiveRange[0] = std::min(effectiveRange[0], gradientRange[0]);
+  effectiveRange[1] = std::max(effectiveRange[1], gradientRange[1]);
+
+  this->SetEffectiveRange(effectiveRange);
+  return true;
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetInterpolationType(int interpolationType)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetInterpolationType: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetInterpolationType(interpolationType);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetShade(int shade)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetShade: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetShade(shade);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetDiffuse(double diffuse)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetDiffuse: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetDiffuse(diffuse);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetAmbient(double ambient)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetAmbient: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetAmbient(ambient);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetSpecular(double specular)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetSpecular: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetSpecular(specular);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetSpecularPower(double specularPower)
+{
+  if (!this->VolumeProperty)
+  {
+    vtkErrorMacro("SetSpecularPower: Invalid volume property");
+    return;
+  }
+  this->VolumeProperty->SetSpecularPower(specularPower);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetScalarOpacityAsString(std::string scalarOpacityFunctionStr)
+{
+  vtkNew<vtkPiecewiseFunction> scalarOpacity;
+  this->GetPiecewiseFunctionFromString(scalarOpacityFunctionStr.c_str(), scalarOpacity);
+  this->VolumeProperty->SetScalarOpacity(scalarOpacity);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetGradientOpacityAsString(std::string gradientOpacityFunctionStr)
+{
+  vtkNew<vtkPiecewiseFunction> gradientOpacity;
+  this->GetPiecewiseFunctionFromString(gradientOpacityFunctionStr.c_str(), gradientOpacity);
+  this->SetGradientOpacity(gradientOpacity);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetRGBTransferFunctionAsString(std::string rgbTransferFunctionStr)
+{
+  vtkNew<vtkColorTransferFunction> colorTransfer;
+  this->GetColorTransferFunctionFromString(rgbTransferFunctionStr.c_str(), colorTransfer);
+  this->SetColor(colorTransfer);
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLVolumePropertyNode::SetPropertyInVolumeNode(vtkVolume* volume)
+{
+  if (!volume)
+  {
+    vtkGenericWarningMacro("SetPropertyInVolumeNodeWithoutModifications: Invalid volume");
+    return;
+  }
+  vtkVolumeProperty* volumeProperty = this->GetVolumeProperty();
+
+  // vtkVolume::SetProperty(vtkVolumeProperty*) calls Modified() on the input property argument
+  // (it is a bug in VTK, as a setter function should not have such side effects).
+  // We need to temporarily ignore Modified events to avoid unnecessary scene modifications.
+
+  bool oldIgnoreVolumePropertyChanges = this->IgnoreVolumePropertyChanges;
+  this->IgnoreVolumePropertyChanges = true;
+  bool oldDisableModifiedEvent = this->GetDisableModifiedEvent();
+  this->DisableModifiedEventOn();
+
+  volume->SetProperty(volumeProperty);
+
+  this->SetDisableModifiedEvent(oldDisableModifiedEvent);
+  this->IgnoreVolumePropertyChanges = oldIgnoreVolumePropertyChanges;
+}

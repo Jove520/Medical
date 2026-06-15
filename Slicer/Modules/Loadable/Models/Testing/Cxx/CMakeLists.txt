@@ -1,0 +1,35 @@
+set(KIT qSlicer${MODULE_NAME}Module)
+
+#-----------------------------------------------------------------------------
+set(MODEL_FILE "${MRMLCore_SOURCE_DIR}/Testing/TestData/cube.vtk")
+set(MODEL_SCENE "${MRMLCore_SOURCE_DIR}/Testing/modelHierarchy.mrml")
+
+#-----------------------------------------------------------------------------
+set(KIT_TEST_SRCS
+  qSlicerModelsModuleWidgetTest.cxx
+  qSlicerModelsModuleWidgetTest1.cxx
+  qSlicerModelsModuleWidgetTestScene.cxx
+  vtkSlicerModelsLogicAddFileTest.cxx
+  )
+
+#-----------------------------------------------------------------------------
+include_directories( ${CMAKE_CURRENT_BINARY_DIR})
+
+#-----------------------------------------------------------------------------
+slicerMacroConfigureModuleCxxTestDriver(
+  NAME ${KIT}
+  SOURCES ${KIT_TEST_SRCS}
+  WITH_VTK_DEBUG_LEAKS_CHECK
+  WITH_VTK_ERROR_OUTPUT_CHECK
+  )
+
+# Configure CMake Qt automatic code generation
+set_target_properties(${KIT}CxxTests PROPERTIES
+  AUTOMOC ON
+  )
+
+#-----------------------------------------------------------------------------
+simple_test( qSlicerModelsModuleWidgetTest1 ${MODEL_FILE} )
+simple_test( qSlicerModelsModuleWidgetTestScene ${MODEL_SCENE} )
+simple_test(vtkSlicerModelsLogicAddFileTest ${MODEL_FILE})
+simple_test( qSlicerModelsModuleWidgetTest )

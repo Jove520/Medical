@@ -1,0 +1,96 @@
+project(qSlicer${MODULE_NAME}ModuleWidgets)
+
+set(KIT ${PROJECT_NAME})
+
+set(${KIT}_EXPORT_DIRECTIVE "Q_SLICER_MODULE_${MODULE_NAME_UPPER}_WIDGETS_EXPORT")
+
+set(${KIT}_INCLUDE_DIRECTORIES
+  ${vtkSlicerSubjectHierarchyModuleLogic_INCLUDE_DIRS}
+  ${qSlicerTerminologiesModuleWidgets_INCLUDE_DIRS}
+  ${MRMLCore_INCLUDE_DIRS}
+  ${MRMLCLI_INCLUDE_DIRS}
+  )
+
+set(${KIT}_SRCS
+  qMRMLSubjectHierarchyModel.cxx
+  qMRMLSubjectHierarchyModel.h
+  qMRMLSubjectHierarchyModel_p.h
+  qMRMLSortFilterSubjectHierarchyProxyModel.cxx
+  qMRMLSortFilterSubjectHierarchyProxyModel.h
+  qMRMLSubjectHierarchyTreeView.cxx
+  qMRMLSubjectHierarchyTreeView.h
+  qMRMLSubjectHierarchyComboBox.cxx
+  qMRMLSubjectHierarchyComboBox.h
+  qSlicerSubjectHierarchyPluginLogic.cxx
+  qSlicerSubjectHierarchyPluginLogic.h
+  qSlicerSubjectHierarchyAbstractPlugin.cxx
+  qSlicerSubjectHierarchyAbstractPlugin.h
+  qSlicerSubjectHierarchyPluginHandler.cxx
+  qSlicerSubjectHierarchyPluginHandler.h
+  qSlicerSubjectHierarchyDefaultPlugin.cxx
+  qSlicerSubjectHierarchyDefaultPlugin.h
+  qSlicerSubjectHierarchyCloneNodePlugin.cxx
+  qSlicerSubjectHierarchyCloneNodePlugin.h
+  qSlicerSubjectHierarchyParseLocalDataPlugin.cxx
+  qSlicerSubjectHierarchyParseLocalDataPlugin.h
+  qSlicerSubjectHierarchyRegisterPlugin.cxx
+  qSlicerSubjectHierarchyRegisterPlugin.h
+  qSlicerSubjectHierarchyFolderPlugin.cxx
+  qSlicerSubjectHierarchyFolderPlugin.h
+  qSlicerSubjectHierarchyOpacityPlugin.cxx
+  qSlicerSubjectHierarchyOpacityPlugin.h
+  qSlicerSubjectHierarchyViewContextMenuPlugin.cxx
+  qSlicerSubjectHierarchyViewContextMenuPlugin.h
+  qSlicerSubjectHierarchyVisibilityPlugin.cxx
+  qSlicerSubjectHierarchyVisibilityPlugin.h
+  qSlicerSubjectHierarchyExportPlugin.cxx
+  qSlicerSubjectHierarchyExportPlugin.h
+  qSlicerSubjectHierarchyExpandToDepthPlugin.cxx
+  qSlicerSubjectHierarchyExpandToDepthPlugin.h
+  )
+if(Slicer_USE_PYTHONQT)
+  list(APPEND ${KIT}_SRCS
+    qSlicerSubjectHierarchyScriptedPlugin.cxx
+    qSlicerSubjectHierarchyScriptedPlugin.h
+    )
+endif()
+
+set(${KIT}_UI_SRCS
+  )
+
+set(${KIT}_RESOURCES
+  Resources/${KIT}.qrc
+  )
+
+#-----------------------------------------------------------------------------
+set_source_files_properties( qSlicerSubjectHierarchyAbstractPlugin.h WRAP_EXCLUDE )
+
+set(${KIT}_TARGET_LIBRARIES
+  vtkSlicer${MODULE_NAME}ModuleLogic
+  qSlicerTerminologiesModuleWidgets
+  MRMLCore
+  vtkSlicerVolumesModuleLogic
+  MRMLCLI
+  )
+
+#-----------------------------------------------------------------------------
+SlicerMacroBuildModuleWidgets(
+  NAME ${KIT}
+  EXPORT_DIRECTIVE ${${KIT}_EXPORT_DIRECTIVE}
+  INCLUDE_DIRECTORIES ${${KIT}_INCLUDE_DIRECTORIES}
+  SRCS ${${KIT}_SRCS}
+  UI_SRCS ${${KIT}_UI_SRCS}
+  TARGET_LIBRARIES ${${KIT}_TARGET_LIBRARIES}
+  RESOURCES ${${KIT}_RESOURCES}
+  WRAP_PYTHONQT
+  )
+
+#-----------------------------------------------------------------------------
+if(Slicer_USE_PYTHONQT)
+  add_subdirectory(Python)
+endif()
+
+#-----------------------------------------------------------------------------
+if(Slicer_BUILD_QT_DESIGNER_PLUGINS)
+  add_subdirectory(DesignerPlugins)
+endif()

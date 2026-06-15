@@ -1,0 +1,405 @@
+/*==============================================================================
+
+  Program: 3D Slicer
+
+  Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
+  Queen's University, Kingston, ON, Canada. All Rights Reserved.
+
+  See COPYRIGHT.txt
+  or http://www.slicer.org/copyright/copyright.txt for details.
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+  This file was originally developed by Csaba Pinter, PerkLab, Queen's University
+  and was supported through CANARIE.
+
+==============================================================================*/
+
+#include "vtkMRMLFolderDisplayNode.h"
+
+// MRML includes
+#include "vtkMRMLDisplayableNode.h"
+#include "vtkMRMLScene.h"
+#include "vtkMRMLSubjectHierarchyNode.h"
+
+//----------------------------------------------------------------------------
+vtkMRMLNodeNewMacro(vtkMRMLFolderDisplayNode);
+
+//-----------------------------------------------------------------------------
+vtkMRMLFolderDisplayNode::vtkMRMLFolderDisplayNode()
+{
+  this->TypeDisplayName = vtkMRMLTr("vtkMRMLFolderDisplayNode", "Folder Display");
+}
+
+//-----------------------------------------------------------------------------
+vtkMRMLFolderDisplayNode::~vtkMRMLFolderDisplayNode() = default;
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::PrintSelf(ostream& os, vtkIndent indent)
+{
+  Superclass::PrintSelf(os, indent);
+
+  vtkMRMLPrintBeginMacro(os, indent);
+  vtkMRMLPrintBooleanMacro(ApplyDisplayPropertiesOnBranch);
+  vtkMRMLPrintEndMacro();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::WriteXML(ostream& of, int nIndent)
+{
+  // Write all attributes not equal to their defaults
+  this->Superclass::WriteXML(of, nIndent);
+
+  vtkMRMLWriteXMLBeginMacro(of);
+  vtkMRMLWriteXMLBooleanMacro(applyDisplayPropertiesOnBranch, ApplyDisplayPropertiesOnBranch);
+  vtkMRMLWriteXMLEndMacro();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::ReadXMLAttributes(const char** atts)
+{
+  int disabledModify = this->StartModify();
+  this->Superclass::ReadXMLAttributes(atts);
+
+  vtkMRMLReadXMLBeginMacro(atts);
+  vtkMRMLReadXMLBooleanMacro(applyDisplayPropertiesOnBranch, ApplyDisplayPropertiesOnBranch);
+  vtkMRMLReadXMLEndMacro();
+
+  this->EndModify(disabledModify);
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::CopyContent(vtkMRMLNode* anode, bool deepCopy /*=true*/)
+{
+  MRMLNodeModifyBlocker blocker(this);
+  Superclass::CopyContent(anode, deepCopy);
+
+  vtkMRMLFolderDisplayNode* node = vtkMRMLFolderDisplayNode::SafeDownCast(anode);
+  if (!node)
+  {
+    return;
+  }
+
+  vtkMRMLCopyBeginMacro(anode);
+  vtkMRMLCopyBooleanMacro(ApplyDisplayPropertiesOnBranch);
+  vtkMRMLCopyEndMacro();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::SetScene(vtkMRMLScene* scene)
+{
+  Superclass::SetScene(scene);
+
+  if (scene)
+  {
+    // Observe subject hierarchy item reparented event
+    vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+    if (!shNode)
+    {
+      vtkErrorMacro("SetScene: Failed to get subject hierarchy node from current scene");
+      return;
+    }
+
+    vtkObserveMRMLObjectEventMacroNoWarning(shNode, vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemReparentedEvent);
+  }
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::ProcessMRMLEvents(vtkObject* caller, unsigned long event, void* callData)
+{
+  Superclass::ProcessMRMLEvents(caller, event, callData);
+
+  if (event == vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemReparentedEvent //
+      && vtkMRMLSubjectHierarchyNode::SafeDownCast(caller))
+  {
+    // Skip if this folder neither applies display properties nor is hidden.
+    // A visible folder with no property override has no effect on a reparented item.
+    // A hidden folder must always notify the reparented node so the display manager
+    // re-evaluates GetHierarchyVisibility(), which checks parent visibility unconditionally.
+    if (!this->ApplyDisplayPropertiesOnBranch && this->GetVisibility() != 0)
+    {
+      return;
+    }
+    // Get item ID for subject hierarchy node events
+    vtkIdType reparentedItemID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    if (callData)
+    {
+      vtkIdType* itemIdPtr = reinterpret_cast<vtkIdType*>(callData);
+      if (itemIdPtr)
+      {
+        reparentedItemID = *itemIdPtr;
+      }
+    }
+    vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::SafeDownCast(caller);
+
+    // Collect the reparented item's entire subtree, then prepend the item itself.
+    // GetItemChildren clears the vector before filling it, so reparentedItemID
+    // must be inserted after the call, not before.
+    std::vector<vtkIdType> itemsToNotify;
+    shNode->GetItemChildren(reparentedItemID, itemsToNotify, /*recursive=*/true);
+    itemsToNotify.insert(itemsToNotify.begin(), reparentedItemID);
+
+    for (vtkIdType notifyItemID : itemsToNotify)
+    {
+      vtkMRMLDisplayableNode* displayableNode = vtkMRMLDisplayableNode::SafeDownCast(shNode->GetItemDataNode(notifyItemID));
+      if (!displayableNode)
+      {
+        continue;
+      }
+      // Trigger display update so the displayable manager re-evaluates hierarchy visibility.
+      for (int i = 0; i < displayableNode->GetNumberOfDisplayNodes(); ++i)
+      {
+        vtkMRMLDisplayNode* currentDisplayNode = displayableNode->GetNthDisplayNode(i);
+        if (currentDisplayNode && currentDisplayNode->GetFolderDisplayOverrideAllowed())
+        {
+          currentDisplayNode->Modified();
+        }
+      }
+    }
+  } // SubjectHierarchyItemReparentedEvent
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::SetApplyDisplayPropertiesOnBranch(bool on)
+{
+  vtkDebugMacro(<< this->GetClassName() << " (" << this << "): setting ApplyDisplayPropertiesOnBranch to " << on);
+  if (this->ApplyDisplayPropertiesOnBranch == on)
+  {
+    return;
+  }
+
+  this->ApplyDisplayPropertiesOnBranch = on;
+  this->Superclass::Modified();
+
+  // Trigger display update of branch both when turned on and off
+  this->ChildDisplayNodesModified();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::Modified()
+{
+  this->Superclass::Modified();
+
+  // Always invoke modified on display nodes in branch (that allow overriding), because
+  // visibility and opacity are applied even if ApplyDisplayPropertiesOnBranch is off
+  this->ChildDisplayNodesModified();
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLFolderDisplayNode::ChildDisplayNodesModified()
+{
+  if (!this->GetScene())
+  {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(this->GetScene());
+  if (!shNode)
+  {
+    vtkErrorMacro("ChildDisplayNodesModified: Failed to get subject hierarchy node from scene");
+    return;
+  }
+  vtkIdType folderItemId = shNode->GetItemByDataNode(this);
+  if (!folderItemId)
+  {
+    return;
+  }
+
+  // Get items in branch
+  std::vector<vtkIdType> childItemIDs;
+  shNode->GetItemChildren(folderItemId, childItemIDs, true);
+
+  bool batchProcessing = (childItemIDs.size() > 10);
+  if (batchProcessing)
+  {
+    this->GetScene()->StartState(vtkMRMLScene::BatchProcessState);
+  }
+
+  std::vector<vtkIdType>::iterator childIt;
+  for (childIt = childItemIDs.begin(); childIt != childItemIDs.end(); ++childIt)
+  {
+    vtkMRMLDisplayableNode* childDisplayableNode = vtkMRMLDisplayableNode::SafeDownCast(shNode->GetItemDataNode(*childIt));
+    if (!childDisplayableNode)
+    {
+      continue;
+    }
+    // Trigger display update for display node of child nodes that allow overriding
+    for (int i = 0; i < childDisplayableNode->GetNumberOfDisplayNodes(); ++i)
+    {
+      vtkMRMLDisplayNode* currentDisplayNode = childDisplayableNode->GetNthDisplayNode(i);
+      if (currentDisplayNode && currentDisplayNode->GetFolderDisplayOverrideAllowed())
+      {
+        currentDisplayNode->Modified();
+      }
+    } // For all display nodes
+  }
+
+  if (batchProcessing)
+  {
+    this->GetScene()->EndState(vtkMRMLScene::BatchProcessState);
+  }
+}
+
+//---------------------------------------------------------------------------
+vtkMRMLDisplayNode* vtkMRMLFolderDisplayNode::GetOverridingHierarchyDisplayNode(vtkMRMLDisplayableNode* node)
+{
+  if (!node || !node->GetScene() || node->GetScene()->IsImporting())
+  {
+    return nullptr;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(node->GetScene());
+  if (!shNode)
+  {
+    vtkErrorWithObjectMacro(node, "GetOverridingHierarchyDisplayNode: Failed to get subject hierarchy node from current scene");
+    return nullptr;
+  }
+  vtkIdType nodeShId = shNode->GetItemByDataNode(node);
+  if (!nodeShId)
+  {
+    // May happen if an AddNode event is caught before SH had the chance to add the item
+    return nullptr;
+  }
+
+  // Get effective display node from hierarchy:
+  // go through parents and return display node of first that applies color
+
+  vtkIdType overridingFolderId = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  for (vtkIdType currentParentId = shNode->GetItemParent(nodeShId); currentParentId != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+       currentParentId = shNode->GetItemParent(currentParentId))
+  {
+    vtkMRMLFolderDisplayNode* folderDisplayNode = vtkMRMLFolderDisplayNode::SafeDownCast(shNode->GetItemDataNode(currentParentId));
+    if (folderDisplayNode)
+    {
+      if (folderDisplayNode->GetApplyDisplayPropertiesOnBranch())
+      {
+        overridingFolderId = currentParentId;
+      }
+    }
+  }
+  if (overridingFolderId == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    return nullptr;
+  }
+  return vtkMRMLDisplayNode::SafeDownCast(shNode->GetItemDataNode(overridingFolderId));
+}
+
+//---------------------------------------------------------------------------
+bool vtkMRMLFolderDisplayNode::GetHierarchyVisibility(vtkMRMLDisplayableNode* node)
+{
+  if (!node || node->GetHideFromEditors())
+  {
+    // Nodes that have HideFromEditors on do not appear in the hierarchy
+    return true;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(node->GetScene());
+  if (!shNode)
+  {
+    vtkErrorWithObjectMacro(node, "GetHierarchyVisibility: Failed to get subject hierarchy node from current scene");
+    return true;
+  }
+  vtkIdType sceneItemID = shNode->GetSceneItemID();
+  vtkIdType nodeShId = shNode->GetItemByDataNode(node);
+  if (!nodeShId)
+  {
+    return true;
+  }
+
+  // Traverse all parents
+  vtkIdType parentItemID = nodeShId;
+  while ((parentItemID = shNode->GetItemParent(parentItemID)) != sceneItemID) // The double parentheses avoids a Linux build warning
+  {
+    if (!parentItemID)
+    {
+      vtkErrorWithObjectMacro(node, "GetHierarchyVisibility: Invalid parent of subject hierarchy item");
+      return false;
+    }
+    vtkMRMLDisplayNode* displayNode = vtkMRMLDisplayNode::SafeDownCast(shNode->GetItemDataNode(parentItemID));
+    if (displayNode && displayNode->GetVisibility() == 0)
+    {
+      // If any of the ancestors are hidden, then the visibility of the node defined by the hierarchy is off
+      return false;
+    }
+  }
+
+  return true;
+}
+
+//---------------------------------------------------------------------------
+double vtkMRMLFolderDisplayNode::GetHierarchyOpacity(vtkMRMLDisplayableNode* node)
+{
+  if (!node || node->GetHideFromEditors())
+  {
+    // Nodes that have HideFromEditors on do not appear in the hierarchy
+    return 1.0;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(node->GetScene());
+  if (!shNode)
+  {
+    vtkErrorWithObjectMacro(node, "GetHierarchyOpacity: Failed to get subject hierarchy node from current scene");
+    return 1.0;
+  }
+  vtkIdType sceneItemID = shNode->GetSceneItemID();
+  vtkIdType nodeShId = shNode->GetItemByDataNode(node);
+  if (!nodeShId)
+  {
+    return 1.0;
+  }
+
+  // Traverse all parents
+  double opacityProduct = 1.0;
+  vtkIdType parentItemID = nodeShId;
+  while ((parentItemID = shNode->GetItemParent(parentItemID)) != sceneItemID) // The double parentheses avoids a Linux build warning
+  {
+    vtkMRMLDisplayNode* displayNode = vtkMRMLDisplayNode::SafeDownCast(shNode->GetItemDataNode(parentItemID));
+    if (displayNode)
+    {
+      opacityProduct *= displayNode->GetOpacity();
+    }
+  }
+
+  return opacityProduct;
+}
+
+//-----------------------------------------------------------------------------
+vtkMRMLFolderDisplayNode* vtkMRMLFolderDisplayNode::AddDisplayNodeForItem(vtkMRMLSubjectHierarchyNode* shNode, vtkIdType itemID)
+{
+  if (!itemID)
+  {
+    vtkGenericWarningMacro("vtkMRMLFolderDisplayNode::AddDisplayNodeForItem: Invalid input item");
+    return nullptr;
+  }
+  if (!shNode)
+  {
+    vtkGenericWarningMacro("vtkMRMLFolderDisplayNode::AddDisplayNodeForItem: Failed to access subject hierarchy node");
+    return nullptr;
+  }
+
+  vtkMRMLFolderDisplayNode* existingDisplayNode = vtkMRMLFolderDisplayNode::SafeDownCast(shNode->GetItemDataNode(itemID));
+  vtkMRMLNode* existingDataNode = shNode->GetItemDataNode(itemID);
+  if (existingDisplayNode)
+  {
+    return existingDisplayNode;
+  }
+  if (existingDataNode)
+  {
+    vtkGenericWarningMacro("vtkMRMLFolderDisplayNode::AddDisplayNodeForItem: " //
+                           << "Item " << itemID << " is already associated to a data node, but it is not a folder display node");
+    return nullptr;
+  }
+
+  vtkNew<vtkMRMLFolderDisplayNode> displayNode;
+  displayNode->SetName(shNode->GetItemName(itemID).c_str());
+  displayNode->SetHideFromEditors(0); // Need to set this so that the folder shows up in SH
+  std::string addedByFolderPluginAttributeName =
+    vtkMRMLSubjectHierarchyConstants::GetSubjectHierarchyAttributePrefix() + std::string(vtkMRMLSubjectHierarchyConstants::GetSubjectHierarchyLevelFolder());
+  displayNode->SetAttribute(addedByFolderPluginAttributeName.c_str(), "1");
+  shNode->GetScene()->AddNode(displayNode);
+
+  shNode->SetItemDataNode(itemID, displayNode);
+
+  shNode->ItemModified(itemID);
+  return displayNode;
+}
