@@ -1,0 +1,29 @@
+# Local build outputs
+Build/
+build/
+out/
+
+# Local third-party source/build/install caches
+ThirdParty/
+SDK/
+
+# Visual Studio and Qt Creator local state
+.vs/
+.qtcreator/
+*.user
+*.suo
+
+# Compiled artifacts and debug symbols
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.idb
+
+# Generated Qt/CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*_autogen/
